@@ -1,5 +1,5 @@
-# Bar Manager
-**Manage your bar**
+# Bottle PET Recycler
+**Recycle PET bottles, to get new filament to print**
 
 - **File language:** *Italian*
 - **Download:** *-*
