@@ -5,4 +5,4 @@
 - **Download:** *-*
 
 # Schematic
-<img align="center" width="70px" src="schematic.png">
+<img align="center" src="schematic.png">
