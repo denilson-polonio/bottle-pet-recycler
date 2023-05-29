@@ -1,193 +1,226 @@
-#include <Servo.h>
 #include <LiquidCrystal.h>
+#include <AccelStepper.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
-// Dichiarazione degli oggetti
-Servo myservo;                            // Oggetto per il controllo del servo motore
-LiquidCrystal lcd(12, 11, 5, 4, 3, 2);     // Oggetto per il controllo dello schermo LCD 16x2
+#define STEP_PIN_X 2
+#define DIR_PIN_X 3
+#define STEP_PIN_E 4
+#define DIR_PIN_E 5
+#define BUTTON_PIN 6
 
-// Dichiarazione dei pin di Arduino
-const int buttonPin = 6;                   // Pin del pulsante
-const int servoPin = 9;                    // Pin del servo motore
-const int relayPin = 10;                   // Pin del relè
-const int potPin = A0;                     // Pin del potenziometro
+AccelStepper stepperX(AccelStepper::DRIVER, STEP_PIN_X, DIR_PIN_X);
+AccelStepper stepperE(AccelStepper::DRIVER, STEP_PIN_E, DIR_PIN_E);
+LiquidCrystal lcd(7, 8, 9, 10, 11, 12);
 
-// Dichiarazione delle variabili
-bool isRelayActive = false;                // Flag per indicare se il relè è attivo
-bool isButtonPressed = false;              // Flag per indicare se il pulsante è stato premuto
-unsigned long relayStartTime = 0;          // Tempo di inizio dell'avvio del relè
-int menuOption = 0;                        // Opzione del menu selezionata
-int prevMenuOption = 0;                    // Opzione del menu precedente
-int potValue = 0;                          // Valore del potenziometro
-unsigned long timerDuration = 0;           // Durata del timer in millisecondi
-unsigned long timerStartTime = 0;          // Tempo di inizio del timer
+int buttonState = HIGH;
+int lastButtonState = HIGH;
+bool recyclingStarted = false;
+bool heatingInProgress = false;
+float targetTemperature = 35.0; // Temperatura target desiderata
+float currentTemperature = 0.0; // Temperatura corrente dell'estrusore
+bool temperatureDetected = false; // Flag per indicare se il sensore di temperatura è stato rilevato
+bool lcdNeedsUpdate = false; // Flag per indicare se l'LCD ha bisogno di essere aggiornato
+
+// Configurazione del sensore di temperatura
+#define ONE_WIRE_BUS 13 // Collegamento del sensore di temperatura al pin digitale 13
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
 
 void setup() {
-  pinMode(buttonPin, INPUT_PULLUP);
-  pinMode(relayPin, OUTPUT);
+  stepperX.setMaxSpeed(20 * 360); // 20 steps per mm
+  stepperX.setAcceleration(500);
 
-  myservo.attach(servoPin);                // Collegamento dell'oggetto servo al pin del servo motore
+  stepperE.setMaxSpeed(500);
+  stepperE.setAcceleration(200);
 
-  lcd.begin(16, 2);                        // Inizializzazione dello schermo LCD
-  lcd.print("PET MAKER");
+  lcd.begin(16, 2);
+  lcd.print("    Ricicla    ");
   lcd.setCursor(0, 1);
-  lcd.print("in avvio...");
-  
-  delay(5000);
-  displayMenu();                           // Visualizza il menu di default
+  lcd.print("   Bottiglie   ");
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  delay(2000);
+  lcd.clear();
+  lcd.print("Premi il bottone");
+  lcd.setCursor(0, 1);
+  lcd.print("per avviare");
+
+  // Inizializzazione del sensore di temperatura
+  sensors.begin();
+  if (sensors.getDeviceCount() > 0) {
+    temperatureDetected = true;
+  }
 }
 
 void loop() {
-  // Leggi il valore del potenziometro
-  potValue = analogRead(potPin);
+  buttonState = digitalRead(BUTTON_PIN);
 
-  // Determina l'opzione del menu in base al valore del potenziometro
-  menuOption = map(potValue, 0, 1023, 0, 2);
+  if (buttonState != lastButtonState) {
+    if (buttonState == LOW) {
+      if (!recyclingStarted && !heatingInProgress) {
+        startRecycling();
+      } else if (recyclingStarted || heatingInProgress) {
+        stopRecycling();
+      }
+    }
 
-  // Verifica se l'opzione del menu è cambiata
-  if (menuOption != prevMenuOption) {
-    prevMenuOption = menuOption;
-    displayMenu();
+    lastButtonState = buttonState;
+    delay(50); // Aggiunta di un piccolo ritardo per evitare il rimbalzo del pulsante
   }
 
-  // Verifica se il pulsante è stato premuto
-  if (digitalRead(buttonPin) == LOW && !isButtonPressed) {
-    isButtonPressed = true;
+  if (recyclingStarted) {
+    if (lcdNeedsUpdate) {
+      lcd.clear();
+      lcd.print("Riciclaggio...");
+      lcd.setCursor(0, 1);
+      lcd.print("Temp: ");
 
-    // Esegui l'azione corrispondente all'opzione del menu
-    switch (menuOption) {
-      case 0:
-        toggleRelay();
-        break;
-      case 1:
-        setTimer();
-        break;
-      case 2:
-        // Aggiungi qui l'azione desiderata per l'opzione 2
-        break;
+      // Aggiornamento della temperatura corrente solo se il sensore è stato rilevato
+      if (temperatureDetected) {
+        currentTemperature = readTemperature();
+      }
+
+      if (temperatureDetected && currentTemperature != -127.0) {
+        int temperatureInt = static_cast<int>(currentTemperature);
+        lcd.print(temperatureInt);
+        lcd.write(byte(0));
+        lcd.print("C|35C");
+      } else {
+        lcd.print("-1C|35C"); // Scrive 0C se il sensore di temperatura non è rilevato
+      }
+
+      lcdNeedsUpdate = false;
     }
-  }
 
-  // Verifica se il pulsante è stato rilasciato
-  if (digitalRead(buttonPin) == HIGH && isButtonPressed) {
-    isButtonPressed = false;
-  }
+    stepperX.run();
+    stepperE.run();
 
-  // Calcola il tempo trascorso dall'avvio del relè
-  if (isRelayActive) {
-    unsigned long currentTime = millis();
-    unsigned long elapsedTime = currentTime - relayStartTime;
-
-    unsigned long seconds = (elapsedTime / 1000) % 60;
-    unsigned long minutes = (elapsedTime / 60000) % 60;
-    unsigned long hours = (elapsedTime / 3600000) % 24;
-
-    lcd.setCursor(0, 1);
-    lcd.print("Tempo: ");
-    if (hours < 10) {
-      lcd.print("0");
+    // Regolazione automatica della temperatura solo se il sensore è stato rilevato
+    if (temperatureDetected && currentTemperature < targetTemperature) {
+      // Accendi l'estrusore
+      // ...
+    } else {
+      // Spegni l'estrusore
+      // ...
     }
-    lcd.print(hours);
-    lcd.print(":");
-    if (minutes < 10) {
-      lcd.print("0");
-    }
-    lcd.print(minutes);
-    lcd.print(":");
-    if (seconds < 10) {
-      lcd.print("0");
-    }
-    lcd.print(seconds);
+  } else if (heatingInProgress) {
+    if (lcdNeedsUpdate) {
+      lcd.clear();
+      lcd.print("Riscaldamento...");
+      lcd.setCursor(0, 1);
+      lcd.print("Temp: ");
 
-    // Verifica se il timer è scaduto
-    if (timerDuration > 0 && elapsedTime >= timerDuration) {
-      toggleRelay();  // Spegni il relè
-    }
-  }
-}
+      // Aggiornamento della temperatura corrente solo se il sensore è stato rilevato
+      if (temperatureDetected) {
+        currentTemperature = readTemperature();
+      }
 
-// Funzione per attivare/disattivare il relè
-void toggleRelay() {
-  if (!isRelayActive) {
-    lcd.clear();
-    lcd.print("Stato: [ON]");
-    lcd.setCursor(0, 1);
-    lcd.print("PET MAKER");
-    digitalWrite(relayPin, HIGH);        // Attiva il relè
-    isRelayActive = true;
-    relayStartTime = millis();            // Registra il tempo di inizio dell'avvio del relè
+      if (temperatureDetected && currentTemperature != -127.0) {
+        int temperatureInt = static_cast<int>(currentTemperature);
+        lcd.print(temperatureInt);
+        lcd.write(byte(0));
+        lcd.print("C|");
+        lcd.print(targetTemperature);
+        lcd.write(byte(0));
+        lcd.print("C");
+      } else {
+        lcd.print("0C|");
+        lcd.print(targetTemperature);
+        lcd.write(byte(0));
+        lcd.print("C"); // Scrive 0C se il sensore di temperatura non è rilevato
+      }
+
+      lcdNeedsUpdate = false;
+    }
+
+    stepperX.run();
+    stepperE.run();
+
+    // Controllo se il riscaldamento è terminato
+    if (temperatureDetected && currentTemperature >= targetTemperature) {
+      recyclingStarted = true; // Avvio del riciclaggio
+      heatingInProgress = false;
+      stepperX.move(1000);
+      stepperE.move(1000);
+      lcdNeedsUpdate = true; // Aggiorna l'LCD quando il riciclaggio inizia
+    }
   } else {
-    digitalWrite(relayPin, LOW);         // Disattiva il relè
-    isRelayActive = false;
-    lcd.clear();
-    lcd.print("Processo");
-    lcd.setCursor(0,1);
-    lcd.print("Terminato");
-    delay(3000);
-    displayMenu();  // Visualizza nuovamente il menu
+    if (lcdNeedsUpdate) {
+      lcd.clear();
+      lcd.print("Premi il bottone");
+      lcd.setCursor(0, 1);
+      lcd.print("per avviare");
+      lcdNeedsUpdate = false;
+    }
+
+    stepperX.stop();
+    stepperE.stop();
   }
 }
 
-// Funzione per impostare il timer
-void setTimer() {
+void startRecycling() {
+  heatingInProgress = true;
+  lcdNeedsUpdate = true; // Aggiorna l'LCD quando il riscaldamento inizia
   lcd.clear();
-  lcd.print("Timer: ");
+  lcd.print("Riscaldamento...");
   lcd.setCursor(0, 1);
-  lcd.print("Rot. pot.");
-  
-  while (digitalRead(buttonPin) == HIGH) {
-    // Leggi il valore del potenziometro per impostare la durata del timer
-    potValue = analogRead(potPin);
-    timerDuration = map(potValue, 0, 1023, 0, 3600000); // Mappa il valore del potenziometro da 0 a 1023 a una durata di 0 a 1 ora
-    
-    // Aggiorna il display con la durata del timer impostata
-    unsigned long minutes = (timerDuration / 60000) % 60;
-    unsigned long seconds = (timerDuration / 1000) % 60;
+  lcd.print("Temp: ");
 
-    lcd.setCursor(0, 1);
-    lcd.print("Durata: ");
-    lcd.print(minutes);
-    lcd.print("m ");
-    lcd.print(seconds);
-    lcd.print("s ");
+  // Aggiornamento della temperatura corrente solo se il sensore è stato rilevato
+  if (temperatureDetected) {
+    currentTemperature = readTemperature();
   }
 
-  // Avvia il timer
-  timerStartTime = millis();
-  lcd.clear();
-  lcd.print("Timer avviato");
-  lcd.setCursor(0,1);
-  lcd.print("Tempo: 10s");
+  if (temperatureDetected && currentTemperature != -127.0) {
+    int temperatureInt = static_cast<int>(currentTemperature);
+    lcd.print(temperatureInt);
+    lcd.print("C|");
+    lcd.print(targetTemperature);
+    lcd.print("C");
+  } else {
+    lcd.print("-1C|");
+    lcd.print(targetTemperature);
+    lcd.print("C"); // Scrive 0C se il sensore di temperatura non è rilevato
+  }
 
-  digitalWrite(relayPin, HIGH);  // Attiva il relè
-  delay(10000);
-  digitalWrite(relayPin, LOW);  // Disattiva il relè
+  // Riscaldamento dell'estrusore fino alla temperatura desiderata
+  while (currentTemperature < targetTemperature && heatingInProgress) {
+    if (temperatureDetected) {
+      currentTemperature = readTemperature();
+    }
+    stepperX.run();
+    stepperE.run();
+    delay(1000); // Attendi 1 secondo tra le letture della temperatura
+  }
 
+  if (heatingInProgress) {
+    recyclingStarted = true; // Avvio del riciclaggio
+    heatingInProgress = false;
+    stepperX.move(1000);
+    stepperE.move(1000);
     lcd.clear();
-    lcd.print("Processo");
-    lcd.setCursor(0,1);
-    lcd.print("Terminato");
-    delay(3000);
-    displayMenu();  // Visualizza nuovamente il menu
+    lcd.print("Riciclaggio...");
+    lcd.setCursor(0, 1);
+    lcd.print("Temp: ");
+    lcdNeedsUpdate = true; // Aggiorna l'LCD quando il riciclaggio inizia
+  }
 }
 
-// Funzione per visualizzare il menu
-void displayMenu() {
+void stopRecycling() {
+  recyclingStarted = false;
+  heatingInProgress = false;
+  stepperX.stop();
+  stepperE.stop();
   lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Menu Principale:");
+  lcd.print("Premi il bottone");
+  lcd.setCursor(0, 1);
+  lcd.print("per avviare");
+  lcdNeedsUpdate = false;
+}
 
-  switch (menuOption) {
-    case 0:
-      lcd.setCursor(0, 1);
-      lcd.print("> ON/OFF");
-      break;
-    case 1:
-      lcd.setCursor(0, 1);
-      lcd.print("> Timer 10s");
-      break;
-    case 2:
-      lcd.setCursor(0, 1);
-      lcd.print("> Opzione 2");
-      break;
-  }
+float readTemperature() {
+  sensors.requestTemperatures();
+  float temperatureC = sensors.getTempCByIndex(0);
+  return temperatureC;
 }
